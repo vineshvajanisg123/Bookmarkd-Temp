@@ -12,6 +12,17 @@ import {
 } from "firebase/firestore";
 import { db, handleFirestoreError, OperationType, isOfflineMode } from "./firebase";
 import { Book, ReadingProfile, SurveyState, Recommendation } from "../types";
+import { isSupabaseConfigured } from "./supabase";
+import { 
+  supabaseSaveReadingProfile, 
+  supabaseGetReadingProfile, 
+  supabaseSaveBookshelfBook, 
+  supabaseDeleteBookshelfBook, 
+  supabaseGetBookshelfBooks,
+  supabaseSaveUser,
+  supabaseLogEvent
+} from "./supabaseSync";
+
 
 // Sanitise inputs to make IDs bulletproof and 100% compliant with firestore.rules regex
 export function getSafeId(key: string): string {
@@ -43,98 +54,184 @@ export async function syncUserProfile(userId: string, email: string) {
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `users/${userId}`);
   }
+
+  // Dual sync account creation and login state
+  if (isSupabaseConfigured) {
+    await supabaseSaveUser(userId, email);
+    await supabaseLogEvent(userId, "USER_LOGIN_SYNC", { email });
+  }
 }
 
 // 2. Fetch user's Reading DNA Profile from the cloud
 export async function getReadingProfile(userId: string): Promise<ReadingProfile | null> {
+  let profile: ReadingProfile | null = null;
+  
   if (isOfflineMode) {
     const saved = localStorage.getItem(`bookmarkd_profile_${userId}`);
-    return saved ? JSON.parse(saved) : null;
-  }
-  const profileRef = doc(db, "users", userId, "profiles", "current");
-  try {
-    const docSnap = await getDoc(profileRef);
-    if (docSnap.exists()) {
-      const data = docSnap.data();
-      return {
-        lovedBook: data.lovedBook || "",
-        hatedBook: data.hatedBook || "",
-        genrePreference: data.genrePreference || "",
-        readingStyle: data.readingStyle || "",
-        goal: data.goal || "",
-        selfDefinition: data.selfDefinition || "",
-        archetype: data.archetype,
-        traits: data.traits || [],
-        reading_pace: data.reading_pace || "Medium",
-        genre_bias: data.genre_bias || "",
-        summary: data.summary || "",
-        insight: data.insight || "",
-        recommendations: data.recommendations || []
-      } as ReadingProfile;
+    profile = saved ? JSON.parse(saved) : null;
+  } else {
+    const profileRef = doc(db, "users", userId, "profiles", "current");
+    try {
+      const docSnap = await getDoc(profileRef);
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        profile = {
+          lovedBook: data.lovedBook || "",
+          hatedBook: data.hatedBook || "",
+          genrePreference: data.genrePreference || "",
+          readingStyle: data.readingStyle || "",
+          goal: data.goal || "",
+          selfDefinition: data.selfDefinition || "",
+          archetype: data.archetype,
+          traits: data.traits || [],
+          reading_pace: data.reading_pace || "Medium",
+          genre_bias: data.genre_bias || "",
+          summary: data.summary || "",
+          insight: data.insight || "",
+          recommendations: data.recommendations || []
+        } as ReadingProfile;
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, `users/${userId}/profiles/current`);
     }
-    return null;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, `users/${userId}/profiles/current`);
-    return null;
   }
+
+  // Dual sync fallback: If we are connected to Supabase and profile wasn't found in Firestore/local, load it
+  if (!profile && isSupabaseConfigured) {
+    try {
+      const sbProfile = await supabaseGetReadingProfile(userId);
+      if (sbProfile) {
+        profile = sbProfile;
+        // Mirror the Supabase profile locally/to Firestore
+        if (isOfflineMode) {
+          localStorage.setItem(`bookmarkd_profile_${userId}`, JSON.stringify(profile));
+        } else {
+          const profileRef = doc(db, "users", userId, "profiles", "current");
+          setDoc(profileRef, {
+            ...sbProfile,
+            updatedAt: serverTimestamp()
+          }).catch(console.error);
+        }
+      }
+    } catch (err) {
+      console.warn("Could not replicate Supabase profile down:", err);
+    }
+  }
+
+  return profile;
 }
 
 // 3. Save user's Reading DNA Profile to the cloud
 export async function saveReadingProfile(userId: string, profile: ReadingProfile) {
   if (isOfflineMode) {
     localStorage.setItem(`bookmarkd_profile_${userId}`, JSON.stringify(profile));
-    return;
+  } else {
+    const profileRef = doc(db, "users", userId, "profiles", "current");
+    try {
+      await setDoc(profileRef, {
+        lovedBook: profile.lovedBook || "",
+        hatedBook: profile.hatedBook || "",
+        genrePreference: profile.genrePreference || "",
+        readingStyle: profile.readingStyle || "",
+        goal: profile.goal || "",
+        selfDefinition: profile.selfDefinition || "",
+        archetype: profile.archetype,
+        traits: profile.traits || [],
+        reading_pace: profile.reading_pace || "Medium",
+        genre_bias: profile.genre_bias || "",
+        summary: profile.summary || "",
+        insight: profile.insight || "",
+        recommendations: profile.recommendations || [],
+        updatedAt: serverTimestamp()
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `users/${userId}/profiles/current`);
+    }
   }
-  const profileRef = doc(db, "users", userId, "profiles", "current");
-  try {
-    await setDoc(profileRef, {
-      lovedBook: profile.lovedBook || "",
-      hatedBook: profile.hatedBook || "",
-      genrePreference: profile.genrePreference || "",
-      readingStyle: profile.readingStyle || "",
-      goal: profile.goal || "",
-      selfDefinition: profile.selfDefinition || "",
+
+  // Backup sync to Supabase in parallel-safe block
+  if (isSupabaseConfigured) {
+    await supabaseSaveReadingProfile(userId, profile);
+    await supabaseLogEvent(userId, "SUBMIT_SURVEY_ANALYSIS", {
       archetype: profile.archetype,
-      traits: profile.traits || [],
-      reading_pace: profile.reading_pace || "Medium",
-      genre_bias: profile.genre_bias || "",
-      summary: profile.summary || "",
-      insight: profile.insight || "",
-      recommendations: profile.recommendations || [],
-      updatedAt: serverTimestamp()
+      reading_pace: profile.reading_pace,
+      genre_preference: profile.genrePreference
     });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, `users/${userId}/profiles/current`);
   }
 }
 
 // 4. Fetch user's bookshelf from the cloud
 export async function getBookshelfBooks(userId: string): Promise<Book[]> {
+  let books: Book[] = [];
+  
   if (isOfflineMode) {
     const saved = localStorage.getItem(`bookmarkd_library_${userId}`) || localStorage.getItem("bookmarkd_library");
-    return saved ? JSON.parse(saved) : [];
-  }
-  const colRef = collection(db, "users", userId, "bookshelf");
-  try {
-    const querySnap = await getDocs(colRef);
-    const books: Book[] = [];
-    querySnap.forEach((docSnap) => {
-      const data = docSnap.data();
-      books.push({
-        title: data.title,
-        author: data.author,
-        category: data.category,
-        description: data.description,
-        coverColor: data.coverColor,
-        coverTextColor: data.coverTextColor,
-        isbn: data.isbn || ""
+    books = saved ? JSON.parse(saved) : [];
+  } else {
+    const colRef = collection(db, "users", userId, "bookshelf");
+    try {
+      const querySnap = await getDocs(colRef);
+      querySnap.forEach((docSnap) => {
+        const data = docSnap.data();
+        books.push({
+          title: data.title,
+          author: data.author,
+          category: data.category,
+          description: data.description,
+          coverColor: data.coverColor,
+          coverTextColor: data.coverTextColor,
+          isbn: data.isbn || ""
+        });
       });
-    });
-    return books;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, `users/${userId}/bookshelf`);
-    return [];
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, `users/${userId}/bookshelf`);
+    }
   }
+
+  // Dual sync sync-up: if Supabase contains books not found in main engine, merge them
+  if (isSupabaseConfigured) {
+    try {
+      const sbBooks = await supabaseGetBookshelfBooks(userId);
+      const booksMap = new Map<string, Book>();
+      books.forEach(b => booksMap.set(b.title.toLowerCase(), b));
+      
+      let hasUpdate = false;
+      sbBooks.forEach(b => {
+        const key = b.title.toLowerCase();
+        if (!booksMap.has(key)) {
+          booksMap.set(key, b);
+          hasUpdate = true;
+          // Replicate missing back to primary cloud
+          if (!isOfflineMode) {
+            const bookId = getSafeId(b.title);
+            const docRef = doc(db, "users", userId, "bookshelf", bookId);
+            setDoc(docRef, { 
+              title: b.title,
+              author: b.author,
+              category: b.category,
+              description: b.description,
+              coverColor: b.coverColor || "#4B564F",
+              coverTextColor: b.coverTextColor || "#FBF7F0",
+              isbn: b.isbn || "",
+              addedAt: serverTimestamp() 
+            }).catch(console.error);
+          }
+        }
+      });
+
+      if (hasUpdate) {
+        books = Array.from(booksMap.values());
+        if (isOfflineMode) {
+          localStorage.setItem(`bookmarkd_library_${userId}`, JSON.stringify(books));
+          localStorage.setItem("bookmarkd_library", JSON.stringify(books));
+        }
+      }
+    } catch (err) {
+      console.warn("Could not replicate Supabase bookshelf down:", err);
+    }
+  }
+
+  return books;
 }
 
 // 5. Add a single book to the user's cloud bookshelf
@@ -147,23 +244,33 @@ export async function saveBookshelfBook(userId: string, book: Book) {
       localStorage.setItem(`bookmarkd_library_${userId}`, JSON.stringify(books));
       localStorage.setItem("bookmarkd_library", JSON.stringify(books));
     }
-    return;
+  } else {
+    const bookId = getSafeId(book.title);
+    const docRef = doc(db, "users", userId, "bookshelf", bookId);
+    try {
+      await setDoc(docRef, {
+        title: book.title,
+        author: book.author,
+        category: book.category,
+        description: book.description,
+        coverColor: book.coverColor || "#4B564F",
+        coverTextColor: book.coverTextColor || "#FBF7F0",
+        isbn: book.isbn || "",
+        addedAt: serverTimestamp()
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `users/${userId}/bookshelf/${bookId}`);
+    }
   }
-  const bookId = getSafeId(book.title);
-  const docRef = doc(db, "users", userId, "bookshelf", bookId);
-  try {
-    await setDoc(docRef, {
+
+  // Sync to Supabase in parallel if active
+  if (isSupabaseConfigured) {
+    await supabaseSaveBookshelfBook(userId, book);
+    await supabaseLogEvent(userId, "ADD_BOOKSHELF_ITEM", {
       title: book.title,
       author: book.author,
-      category: book.category,
-      description: book.description,
-      coverColor: book.coverColor || "#4B564F",
-      coverTextColor: book.coverTextColor || "#FBF7F0",
-      isbn: book.isbn || "",
-      addedAt: serverTimestamp()
+      category: book.category
     });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, `users/${userId}/bookshelf/${bookId}`);
   }
 }
 
@@ -177,14 +284,22 @@ export async function deleteBookshelfBook(userId: string, bookTitle: string) {
       localStorage.setItem(`bookmarkd_library_${userId}`, JSON.stringify(filtered));
       localStorage.setItem("bookmarkd_library", JSON.stringify(filtered));
     }
-    return;
+  } else {
+    const bookId = getSafeId(bookTitle);
+    const docRef = doc(db, "users", userId, "bookshelf", bookId);
+    try {
+      await deleteDoc(docRef);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `users/${userId}/bookshelf/${bookId}`);
+    }
   }
-  const bookId = getSafeId(bookTitle);
-  const docRef = doc(db, "users", userId, "bookshelf", bookId);
-  try {
-    await deleteDoc(docRef);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, `users/${userId}/bookshelf/${bookId}`);
+
+  // Delete from Supabase in parallel if active
+  if (isSupabaseConfigured) {
+    await supabaseDeleteBookshelfBook(userId, bookTitle);
+    await supabaseLogEvent(userId, "REMOVE_BOOKSHELF_ITEM", {
+      title: bookTitle
+    });
   }
 }
 

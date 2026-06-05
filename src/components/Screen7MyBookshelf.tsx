@@ -2,12 +2,14 @@ import { useState } from "react";
 import { Book } from "../types";
 import { X, ShoppingBag, ArrowUpRight, ArrowLeft } from "lucide-react";
 import BookCover from "./BookCover";
+import SupabaseConnectionCard from "./SupabaseConnectionCard";
 
 interface Screen7MyBookshelfProps {
   libraryBooks: Book[];
   onRemoveBook: (book: Book) => void;
   onHome: () => void;
   onExplore: () => void;
+  userId?: string;
 }
 
 export default function Screen7MyBookshelf({
@@ -15,8 +17,10 @@ export default function Screen7MyBookshelf({
   onRemoveBook,
   onHome,
   onExplore,
+  userId,
 }: Screen7MyBookshelfProps) {
   const [searchTerm, setSearchTerm] = useState("");
+
 
   const filtered = libraryBooks.filter((b) =>
     b.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -159,6 +163,11 @@ export default function Screen7MyBookshelf({
             })}
           </div>
         )}
+      </div>
+
+      {/* Supabase Connection Options */}
+      <div className="mt-16 pt-10 border-t border-[#E8E2D8]/60">
+        <SupabaseConnectionCard userId={userId || "offline-guest-uid"} />
       </div>
 
       <footer className="border-t border-brand-border/40 pt-4 mt-20 text-center text-[10px] font-mono text-brand-muted tracking-widest">

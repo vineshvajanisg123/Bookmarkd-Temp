@@ -9,6 +9,8 @@ import Screen6WanderTheStacks from "./components/Screen6WanderTheStacks";
 import Screen7MyBookshelf from "./components/Screen7MyBookshelf";
 import HeaderMenu from "./components/HeaderMenu";
 import BookMentor from "./components/BookMentor";
+import Screen0Login from "./components/Screen0Login";
+import { BookOpen } from "lucide-react";
 import { calculateFallbackProfile } from "./data/fallbackDNA";
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User, signInAnonymously } from "firebase/auth";
 import { auth, isOfflineMode } from "./lib/firebase";
@@ -33,6 +35,7 @@ export default function App() {
   // Auth States
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
   // Auto-scroll to top upon screen navigation to prevent retaining scroll positions
   useEffect(() => {
@@ -109,64 +112,25 @@ export default function App() {
 
   // Track and synchronize authenticated session on boot
   useEffect(() => {
-    if (isOfflineMode) {
-      // Mock local guest session instantly
-      const guestUser = {
-        uid: "offline-guest-uid",
-        isAnonymous: true,
-        email: "offline-guest@bookmarkd.internal",
-        displayName: "Sanctuary Guest"
-      } as any;
-      setUser(guestUser);
-      setAuthLoading(true);
-
-      const localSaved = localStorage.getItem("bookmarkd_library_offline-guest-uid") || localStorage.getItem("bookmarkd_library");
-      if (localSaved) {
-        try {
-          setLibraryBooks(JSON.parse(localSaved));
-        } catch (e) {}
-      }
-
-      const localProfileString = localStorage.getItem("bookmarkd_profile_offline-guest-uid");
-      if (localProfileString) {
-        try {
-          const dbProfile = JSON.parse(localProfileString);
-          setReadingProfile(dbProfile);
-          setSurveyData({
-            lovedBook: dbProfile.lovedBook || "",
-            hatedBook: dbProfile.hatedBook || "",
-            genrePreference: (dbProfile.genrePreference || "") as any,
-            readingStyle: (dbProfile.readingStyle || "") as any,
-            goal: (dbProfile.goal || "") as any,
-            selfDefinition: dbProfile.selfDefinition || ""
-          });
-        } catch (e) {}
-      }
-      setAuthLoading(false);
-      return;
-    }
-
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
-      if (currentUser) {
+    const savedCustomUserStr = localStorage.getItem("bookmarkd_custom_user");
+    if (savedCustomUserStr) {
+      try {
+        const customUser = JSON.parse(savedCustomUserStr);
+        setUser(customUser);
         setAuthLoading(true);
-        try {
-          // Initialize/Ensure User document
-          await syncUserProfile(currentUser.uid, currentUser.email || "");
 
-          // Sync bookshelf between cloud and offline copy
-          const localSaved = localStorage.getItem("bookmarkd_library");
-          let loadedLocal: Book[] = [];
-          if (localSaved) {
-            try { loadedLocal = JSON.parse(localSaved); } catch (e) {}
-          }
-          const syncedBooks = await syncLocalBookshelfWithCloud(currentUser.uid, loadedLocal);
-          setLibraryBooks(syncedBooks);
-          localStorage.setItem("bookmarkd_library", JSON.stringify(syncedBooks));
+        const localSaved = localStorage.getItem(`bookmarkd_library_${customUser.uid}`) || localStorage.getItem("bookmarkd_library");
+        if (localSaved) {
+          try {
+            setLibraryBooks(JSON.parse(localSaved));
+          } catch (e) {}
+        }
 
-          // Load profile if active
-          const dbProfile = await getReadingProfile(currentUser.uid);
-          if (dbProfile) {
+        // Try getting profile local first
+        const localProfileString = localStorage.getItem(`bookmarkd_profile_${customUser.uid}`);
+        if (localProfileString) {
+          try {
+            const dbProfile = JSON.parse(localProfileString);
             setReadingProfile(dbProfile);
             setSurveyData({
               lovedBook: dbProfile.lovedBook || "",
@@ -176,24 +140,32 @@ export default function App() {
               goal: (dbProfile.goal || "") as any,
               selfDefinition: dbProfile.selfDefinition || ""
             });
-          }
-        } catch (err) {
-          console.error("Auth database sync failed:", err);
-        } finally {
-          setAuthLoading(false);
+          } catch (e) {}
+        } else {
+          // Fallback to cloud query
+          getReadingProfile(customUser.uid).then(dbProfile => {
+            if (dbProfile) {
+              setReadingProfile(dbProfile);
+              setSurveyData({
+                lovedBook: dbProfile.lovedBook || "",
+                hatedBook: dbProfile.hatedBook || "",
+                genrePreference: (dbProfile.genrePreference || "") as any,
+                readingStyle: (dbProfile.readingStyle || "") as any,
+                goal: (dbProfile.goal || "") as any,
+                selfDefinition: dbProfile.selfDefinition || ""
+              });
+            }
+          }).catch(console.error);
         }
-      } else {
-        // Automatically sign in anonymously to guarantee we always capture user trace
-        try {
-          await signInAnonymously(auth);
-        } catch (e) {
-          console.warn("Anonymous authentication failed on startup:", e);
-          setAuthLoading(false);
-        }
+      } catch (err) {
+        console.error("Hydration of custom user session failed:", err);
+      } finally {
+        setAuthLoading(false);
       }
-    });
-
-    return () => unsubscribe();
+    } else {
+      setUser(null);
+      setAuthLoading(false);
+    }
   }, []);
 
   // Synchronise page navigation / screen change tracking
@@ -210,56 +182,71 @@ export default function App() {
   };
 
   const handleLogin = async () => {
+    setIsAuthModalOpen(true);
+  };
+
+  const handleAuthSuccess = async (userData: { email: string; displayName: string; uid: string }) => {
+    // Commit custom session keys to localStorage for recovery on boot
+    localStorage.setItem("bookmarkd_custom_user", JSON.stringify(userData));
+
+    const loggedUser = {
+      uid: userData.uid,
+      isAnonymous: false,
+      email: userData.email,
+      displayName: userData.displayName
+    } as any;
+    setUser(loggedUser);
     setAuthLoading(true);
-    if (isOfflineMode) {
-      const memberUser = {
-        uid: "offline-member-uid",
-        isAnonymous: false,
-        email: "phoenix.reborn139@gmail.com",
-        displayName: "phoenix.reborn139"
-      } as any;
-      setUser(memberUser);
 
-      const localSaved = localStorage.getItem("bookmarkd_library_offline-member-uid") || localStorage.getItem("bookmarkd_library");
-      if (localSaved) {
-        try {
-          setLibraryBooks(JSON.parse(localSaved));
-        } catch (e) {}
-      }
+    try {
+      // Synchronous dual write / profile initialization
+      await syncUserProfile(userData.uid, userData.email);
 
-      const localProfileString = localStorage.getItem("bookmarkd_profile_offline-member-uid");
-      if (localProfileString) {
-        try {
-          const dbProfile = JSON.parse(localProfileString);
-          setReadingProfile(dbProfile);
-          setSurveyData({
-            lovedBook: dbProfile.lovedBook || "",
-            hatedBook: dbProfile.hatedBook || "",
-            genrePreference: (dbProfile.genrePreference || "") as any,
-            readingStyle: (dbProfile.readingStyle || "") as any,
-            goal: (dbProfile.goal || "") as any,
-            selfDefinition: dbProfile.selfDefinition || ""
-          });
-        } catch (e) {}
+      // Hydrate bookshelf from data store / cloud
+      const cloudBooks = await syncLocalBookshelfWithCloud(userData.uid, []);
+      setLibraryBooks(cloudBooks);
+      localStorage.setItem(`bookmarkd_library_${userData.uid}`, JSON.stringify(cloudBooks));
+
+      const dbProfile = await getReadingProfile(userData.uid);
+      if (dbProfile) {
+        setReadingProfile(dbProfile);
+        setSurveyData({
+          lovedBook: dbProfile.lovedBook || "",
+          hatedBook: dbProfile.hatedBook || "",
+          genrePreference: (dbProfile.genrePreference || "") as any,
+          readingStyle: (dbProfile.readingStyle || "") as any,
+          goal: (dbProfile.goal || "") as any,
+          selfDefinition: dbProfile.selfDefinition || ""
+        });
+        localStorage.setItem(`bookmarkd_profile_${userData.uid}`, JSON.stringify(dbProfile));
       } else {
         setReadingProfile(null);
         setSurveyData(null);
       }
-      setAuthLoading(false);
-      return;
-    }
-
-    const provider = new GoogleAuthProvider();
-    try {
-      await signInWithPopup(auth, provider);
     } catch (err) {
-      console.error("Google Authenticate failed:", err);
+      console.error("Authenticated post-login synchronization failed:", err);
+    } finally {
       setAuthLoading(false);
     }
   };
 
   const handleLogout = async () => {
     setAuthLoading(true);
+    
+    localStorage.removeItem("bookmarkd_custom_user");
+    
+    try {
+      if (!isOfflineMode) {
+        await signOut(auth);
+      }
+    } catch (e) {
+      console.warn("Sign out failed:", e);
+    }
+
+    setUser(null);
+    setSurveyData(null);
+    setReadingProfile(null);
+
     const defaultBooks = [
       {
         title: "Quiet",
@@ -287,62 +274,11 @@ export default function App() {
         coverColor: "#3F2E2E",
         coverTextColor: "#FAF6F0",
         isbn: "0374275632"
-      },
-      {
-        title: "Flow",
-        author: "Mihaly Csikszentmihalyi",
-        category: "Psychology",
-        description: "The classic study of optimal experience, mapping how total absorption in a challenging task triggers high fulfillment.",
-        coverColor: "#2A3A40",
-        coverTextColor: "#EAE6DF",
-        isbn: "0061339202"
-      },
-      {
-        title: "Atomic Habits",
-        author: "James Clear",
-        category: "Self-Improvement",
-        description: "James Clear designs a gorgeous system demonstrating how small behavior revisions compound into immense life outcomes.",
-        coverColor: "#2C3E35",
-        coverTextColor: "#F1EFEA",
-        isbn: "0735211299"
-      },
-      {
-        title: "Blink",
-        author: "Malcolm Gladwell",
-        category: "Decision Making",
-        description: "Malcolm Gladwell investigates the power of the subconscious mind to execute split-second, highly intuitive selections.",
-        coverColor: "#1F3B2E",
-        coverTextColor: "#F6F3EB",
-        isbn: "0316010669"
       }
     ];
 
-    if (isOfflineMode) {
-      setLibraryBooks(defaultBooks);
-      localStorage.removeItem("bookmarkd_library");
-      setSurveyData(null);
-      setReadingProfile(null);
-      setUser({
-        uid: "offline-guest-uid",
-        isAnonymous: true,
-        email: "offline-guest@bookmarkd.internal",
-        displayName: "Sanctuary Guest"
-      } as any);
-      setActiveScreen(1);
-      setAuthLoading(false);
-      return;
-    }
-
-    try {
-      await signOut(auth);
-      setLibraryBooks(defaultBooks);
-      localStorage.removeItem("bookmarkd_library");
-      setSurveyData(null);
-      setReadingProfile(null);
-      setActiveScreen(1);
-    } catch (err) {
-      console.error("Sign out failed:", err);
-    }
+    setLibraryBooks(defaultBooks);
+    setActiveScreen(1);
     setAuthLoading(false);
   };
 
@@ -429,6 +365,25 @@ export default function App() {
     setActiveScreen(4);
   };
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#FAF6F0] flex flex-col items-center justify-center space-y-4">
+        <div className="w-12 h-12 rounded-full bg-[#365947] flex items-center justify-center animate-pulse">
+          <BookOpen className="text-white w-5 h-5 animate-spin" style={{ animationDuration: "5s" }} />
+        </div>
+        <p className="font-serif italic text-xs text-[#5E5A55] tracking-tight animate-pulse">
+          Consulting the literary vault...
+        </p>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <Screen0Login onSuccess={handleAuthSuccess} />
+    );
+  }
+
   return (
     <div className="bg-[#FAF6F0] min-h-screen flex flex-col">
       {activeScreen !== 3 && (
@@ -512,10 +467,11 @@ export default function App() {
             onRemoveBook={toggleBookLibrary}
             onHome={() => setActiveScreen(1)}
             onExplore={() => setActiveScreen(6)}
+            userId={user?.uid}
           />
         )}
       </div>
-      <BookMentor libraryBooks={libraryBooks} onToggleLibrary={toggleBookLibrary} />
+      <BookMentor libraryBooks={libraryBooks} onToggleLibrary={toggleBookLibrary} userId={user?.uid} />
     </div>
   );
 }

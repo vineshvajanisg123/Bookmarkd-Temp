@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { MessageSquare, X, Send, Sparkles, AlertCircle, RefreshCw, BookOpen, User, CornerDownLeft } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Book } from "../types";
+import { supabaseSaveMentorMessage, supabaseLogEvent } from "../lib/supabaseSync";
 
 interface Message {
   id: string;
@@ -13,9 +14,10 @@ interface Message {
 interface BookMentorProps {
   libraryBooks?: Book[];
   onToggleLibrary?: (book: Book) => void;
+  userId?: string;
 }
 
-export default function BookMentor({ libraryBooks = [], onToggleLibrary }: BookMentorProps) {
+export default function BookMentor({ libraryBooks = [], onToggleLibrary, userId }: BookMentorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState("");
@@ -149,6 +151,11 @@ If none of these feel quite right, tell me what feels off and we'll keep explori
     saveChatHistory(updatedHistory);
     setIsLoading(true);
 
+    if (userId) {
+      supabaseSaveMentorMessage(userId, userMessage.id, "user", userMessage.text).catch(console.error);
+      supabaseLogEvent(userId, "SEND_MENTOR_MESSAGE", { messageLength: userMessage.text.length }).catch(console.error);
+    }
+
     try {
       // Map history to server payloads
       const payloadMessages = updatedHistory.map((m) => ({
@@ -180,6 +187,11 @@ If none of these feel quite right, tell me what feels off and we'll keep explori
       const finalHistory = [...updatedHistory, assistantMessage];
       setMessages(finalHistory);
       saveChatHistory(finalHistory);
+
+      if (userId) {
+        supabaseSaveMentorMessage(userId, assistantMessage.id, "assistant", assistantMessage.text).catch(console.error);
+        supabaseLogEvent(userId, "RECEIVE_MENTOR_RESPONSE", { source: "google_ai_studio" }).catch(console.error);
+      }
     } catch (err: any) {
       console.warn("Express server not detected (this is normal on static setups). Invoking premium client-side Book Mentor flow:", err);
       
@@ -197,6 +209,11 @@ If none of these feel quite right, tell me what feels off and we'll keep explori
       const finalHistory = [...updatedHistory, assistantMessage];
       setMessages(finalHistory);
       saveChatHistory(finalHistory);
+
+      if (userId) {
+        supabaseSaveMentorMessage(userId, assistantMessage.id, "assistant", assistantMessage.text).catch(console.error);
+        supabaseLogEvent(userId, "RECEIVE_MENTOR_RESPONSE", { source: "static_companion" }).catch(console.error);
+      }
     } finally {
       setIsLoading(false);
     }

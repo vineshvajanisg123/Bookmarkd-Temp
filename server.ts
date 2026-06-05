@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
@@ -442,6 +443,109 @@ app.get("/api/predict-books", async (req, res) => {
   aiBooks.forEach(addUniquely);
 
   return res.json(merged.slice(0, 10));
+});
+
+// Persistent registered user accounts (Local Server-Side DB with Test Backdoor)
+const USERS_FILE = path.join(process.cwd(), "registered_users.json");
+
+interface SavedUser {
+  name: string;
+  email: string;
+  passwordHash: string;
+}
+
+function loadUsers(): Record<string, SavedUser> {
+  try {
+    if (fs.existsSync(USERS_FILE)) {
+      const data = fs.readFileSync(USERS_FILE, "utf-8");
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error("Failed to load registered users from disk:", err);
+  }
+  // Standard hardcoded fallback with test backdoor credentials
+  return {
+    "test@test.com": {
+      name: "Test User",
+      email: "test@test.com",
+      passwordHash: "test"
+    }
+  };
+}
+
+function saveUsers(users: Record<string, SavedUser>) {
+  try {
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Failed to save registered users to disk:", err);
+  }
+}
+
+// Synced in-memory registry of registered user profiles
+let registeredUsers = loadUsers();
+
+// BACKEND API - Register verification
+app.post("/api/auth/register", (req, res) => {
+  const { fullName, email, password } = req.body;
+  if (!fullName || !email || !password) {
+    return res.status(400).json({ error: "Full name, Email ID, and Password are required." });
+  }
+
+  const normalizedEmail = email.toLowerCase().trim();
+  // Refresh cache
+  registeredUsers = loadUsers();
+
+  if (registeredUsers[normalizedEmail]) {
+    return res.status(400).json({ error: "The provided User Email ID is already registered." });
+  }
+
+  registeredUsers[normalizedEmail] = {
+    name: fullName.trim(),
+    email: normalizedEmail,
+    passwordHash: password
+  };
+  saveUsers(registeredUsers);
+
+  res.json({
+    success: true,
+    message: "Registration completed successfully",
+    user: {
+      email: normalizedEmail,
+      displayName: fullName.trim(),
+      uid: `usr_${Buffer.from(normalizedEmail).toString("hex").substring(0, 16)}`
+    }
+  });
+});
+
+// BACKEND API - Login verification
+app.post("/api/auth/login", (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: "User Email ID and Password are required." });
+  }
+
+  const normalizedEmail = email.toLowerCase().trim();
+  // Refresh cache to pick up any newer registrations
+  registeredUsers = loadUsers();
+
+  const matchedUser = registeredUsers[normalizedEmail];
+
+  if (!matchedUser) {
+    return res.status(401).json({ error: "No registered account found with this User Email ID." });
+  }
+
+  if (matchedUser.passwordHash !== password) {
+    return res.status(401).json({ error: "Incorrect password entered." });
+  }
+
+  res.json({
+    success: true,
+    user: {
+      email: normalizedEmail,
+      displayName: matchedUser.name,
+      uid: `usr_${Buffer.from(normalizedEmail).toString("hex").substring(0, 16)}`
+    }
+  });
 });
 
 // API endpoint for analyzing Reading DNA via Gemini

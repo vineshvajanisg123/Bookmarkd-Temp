@@ -1,4 +1,4 @@
-import { BookOpen, LogIn, LogOut, User as UserIcon } from "lucide-react";
+import { BookOpen, LogOut, User as UserIcon } from "lucide-react";
 import { User } from "firebase/auth";
 
 interface HeaderMenuProps {
@@ -85,7 +85,7 @@ export default function HeaderMenu({
 
         {/* Authentication Options on the Right */}
         <div className="flex items-center gap-3">
-          {isRealUser ? (
+          {loggedInUser && (
             <div className="flex items-center gap-2">
               <div className="hidden md:flex flex-col items-end text-right">
                 <span className="text-[10px] font-mono text-brand-muted uppercase leading-none">Sanctuary Account</span>
@@ -113,14 +113,6 @@ export default function HeaderMenu({
                 <LogOut className="w-4 h-4 shrink-0" />
               </button>
             </div>
-          ) : (
-            <button
-              onClick={onLogin}
-              className="px-3 py-1.5 border border-brand-accent/50 hover:bg-[#365947]/5 text-brand-accent text-xs font-serif rounded-md transition-all flex items-center gap-1.5 cursor-pointer shadow-xs font-medium"
-            >
-              <LogIn className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Sign In</span>
-            </button>
           )}
         </div>
       </div>
